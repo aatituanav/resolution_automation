@@ -12,6 +12,9 @@ La solución está estructurada en las siguientes secciones o archivos.
   - Generador de datos sintéticos *(ner_sintetic_data_creation.ipynb)*
   - Entrenamiento del modelo *(trainModel_bert-spanish-cased-finetuned-ner.ipynb)*
   - Inferencia *(useModel_bert-spanish-cased-finetuned-ner.ipynb)*
+- Creador de borradores de resoluciones institucionales.
+  - Ingesta y almacenamiento  de embeddings de artículos LOES en base vectorial.*(Ingestion_retrieval_augmented_generation.ipynb)*
+  - Utilización de prototipo RAG para creación de borradores*(Response_retrieval_augmented_generation.ipynb)*
 
 En las respectivas carpetas también encontrará los archivos con los datos en crudo utilizados para entrenar a los modelos.
 
@@ -372,7 +375,7 @@ token_classifier = pipeline(
 )
 ```
 Listo! Una vez cargado el pipeline, solo ejecútelo con el texto de su preferencia 
-```
+```python
 texto = """
 Que, mediante resolución RCT-SE-04-Nro.58-2023 con fecha 16 de septiembre de 2023,
 en sesión extraordinaria de Consejo Transitorio se posesionó a los representantes
@@ -413,4 +416,160 @@ SALIDA ESPERADA:
   'word': 'reglamento de la unidad de relaciones públicas y comunicación',
   'start': 490,
   'end': 551}]
+```
+## CREADOR DE BORRADORES
+Este prototipo automatiza la generación de borradores de documentos de resoluciones administrativas del Instituto Tecnológico Yaruquí mediante Retrieval-Augmented Generation (RAG) especializado en la normativa legal LOES.
+
+La creación de la solución se divide en dos partes o archivos: 
+
+### INSTANCIACIÓN DE MODELO E INGESTA DE DATOS
+
+El archivo *Ingestion_retrieval_augmented_generation.ipynb* contiene todo el algoritmo para establecer el pipeline de ingesta de datos, siéntase libre de ejecutar cada celda consecutivamente
+
+#### Cómo Ejecutar
+
+Instalación de depencencias 
+```bash
+!pip install PyPDF2 langchain faiss-cpu -q > /dev/null 2>&1
+```
+La explicación de cada método se encuentra en el notebook aquí se da un vistazo rápido a los metodos usados.
+
+Primero se definen métodos para tratar el documento proporcionado, en donde se encuentra la *LEY ORGÁNICA DE EDUCACIÓN SUPERIOR*, mismos que van a ser utilizados para la elaboración de los *CONSIDERANDOS*, los métodos permiten convertir el pdf en divisiones o chunks en donde cada particion representa a un artículo.
+
+Nota: Si el artículo es muy grande, el algoritmo particiona el mismo en diferentes chunks.
+```python
+text = extract_text_from_pdf("ley_educacion.pdf")
+
+cleanText = clean_legal_text(text)
+
+chunk_size = 1024
+chunk_overlap=150
+chunks = chunk_legal_text(cleanText, chunk_size, chunk_overlap)
+
+embeddings, model = generate_embeddings(chunks)
+
+```
+
+Estructura de chunks
+```
+=== CHUNK 1 ===
+Art. 1.-Ámbito.-Esta Ley regula el sistema de educación superior en el país, a los organismos e
+instituciones que lo integran; determina derechos, deberes y obligaciones de las personas naturales
+y jurídicas, y establece las respectivas sanciones por el incumplimiento de las disposiciones
+contenidas en la Constitución y la presente Ley.
+
+============================================================
+
+=== CHUNK 2 ===
+Art. 2.-Objeto.-Esta Ley tiene como objeto definir sus principios, garantizar el derecho a la educación
+superior de calidad que propenda a la excelencia interculturalidad, al acceso universal, permanencia,
+movilidad y egreso sin discriminación alguna y con gratuidad en el ámbito público hasta el tercer
+nivel.
+Nota: Artículo reformado por artículo 2 de Ley No. 0, publicada en Registro Oficial Suplemento 297
+de 2 de Agosto del 2018 .
+Concordancias:
+CONSTITUCIÓN DE LA REPÚBLICA DEL ECUADOR, Arts. 11, 346
+CAPÍTULO 2
+FINES DE LA EDUCACIÓN SUPERIOR
+
+============================================================
+
+=== CHUNK 3 ===
+Art. 3.-Fines de la Educación Superior.-La educación superior de carácter humanista, intercultural y
+científica constituye un derecho de las personas y un bien público social que, de conformidad con la
+...
+h) El derecho a recibir una educación superior laica, intercultural, democrática, incluyente y diversa,
+
+============================================================
+```
+
+El siguiente método permite instanciar modelo y generar embeddings de los chunks basándose en el modelo transformers *jinaai/jina-embeddings-v3*, mismos que se almacenarán más tarde para la búsqueda semántica.
+
+
+ ```python
+ embeddings, model = generate_embeddings(chunks)
+ ```
+
+ Finalmente se crea un indice FAISS, el cual permite buscar embeddings de manera eficiente.
+ ```python
+index = create_faiss_index(embeddings)
+ ```
+
+ El resto del código permite almacenar localmente el modelo, sin embargo se utiliza Hugging Face para un rápido acceso de los embeddings y el modelo al momento de generar los borradores.
+
+
+ ### INSTANCIACIÓN DE MODELO E INGESTA DE DATOS
+El archivo *Response_retrieval_augmented_generation.ipynb* contiene todo el algoritmo para establecer el pipeline de creación de borradores, siéntase libre de ejecutar cada celda consecutivamente.
+
+Se realiza la carga del los componentes necesarios seteados previamente
+
+```python
+chunks, embeddings, index, model, metadata = load_from_huggingface("aatituanav/rag_LOES")
+```
+
+Para la utilización se realizan los llamados de los metodos de la siguiete manera 
+
+```python
+# Procesar consulta del usuario
+keywords = ["Andres Tituana", "consejo directivo", "dimision"]
+
+# Generar contexto
+context = generate_context(keywords)
+
+# Generar borrador
+borrador = generate_draft_document(keywords, context)
+```
+
+El método *generate_context* es el encargado de hacer dos cosas principales
+ - Primero: Se utiliza el modelo DeepSeek para realizar una "expansión de consulta" con los keywords dados por el usuario generando 5 terminos de búsqueda que puedan servir para elaborar los considerandos.
+ - Segundo: Se utilizan los terminos de búsqueda para realizar una búsqueda semántica, la cual devuelve los artículos del LOES que mayor relevancia tengan, a lo que se le llama "contexto"
+
+El método *generate_draft_document* toma el contexto junto a las palabras clave y utiliza nuevamente el modelo DeepSeek para elaborar un borrador de resolucion siguiendo estrictamente un modelo.
+
+Salida esperada para las palabras *"Andres Tituana"*, *"consejo directivo"*, *"dimision"*
+```
+Términos clave: 
+Dimisión del consejo directivo
+Procedimiento de renuncia de autoridades institucionales
+Causales de cese de miembros del consejo directivo
+Reemplazo y sucesión en órganos de gobierno universitario
+Atribuciones del consejo directivo en casos de dimisión
+''' 
+RESOLUCIÓN: [NUMERO_RESOLUCION]
+
+EL ÓRGANO COLEGIADO SUPERIOR DEL INSTITUTO SUPERIOR TECNOLÓGICO YARUQUÍ
+
+CONSIDERANDO:
+Que, de conformidad con lo establecido en el Art. 64.1 de la Ley Orgánica de Educación Superior, las máximas autoridades de las Instituciones de Educación Superior podrán ser removidas por el Consejo de Educación Superior, previa solicitud de al menos las dos terceras partes del órgano colegiado superior, en los casos específicamente determinados;
+
+Que, según lo dispuesto en el Art. 52 de la LOES, el estatuto de toda institución de educación superior contemplará la subrogación o reemplazo del rector o rectora, vicerrectores o vicerrectoras y autoridades académicas en caso de ausencia temporal o definitiva, en ejercicio de su autonomía responsable;
+
+Que, el Art. 63 de la LOES establece que para la instalación y funcionamiento de los órganos de cogobierno será necesario que exista un quórum de más de la mitad de sus integrantes, y que las resoluciones se tomarán por mayoría simple o especial, de conformidad con lo dispuesto en los estatutos de cada institución;
+
+Que, mediante comunicación formal recibida en esta Secretaría, el señor Andres Tituana ha presentado su renuncia irrevocable al cargo que venía desempeñando como miembro del Consejo Directivo de esta institución;
+
+Que, el Órgano Colegiado Superior, reunido en sesión ordinaria/extraordinaria con el quórum legalmente requerido, ha analizado la situación presentada y determinado proceder conforme a las atribuciones conferidas por la normativa vigente;
+
+RESUELVE:
+ARTÍCULO PRIMERO.- Aceptar la dimisión presentada por el señor Andres Tituana al cargo de miembro del Consejo Directivo del Instituto Superior Tecnológico Yaruquí, efectiva a partir de la fecha de la presente resolución.
+
+ARTÍCULO SEGUNDO.- Disponer que el Órgano Colegiado Superior inicie el proceso de designación del nuevo miembro del Consejo Directivo que reemplazará al señor Andres Tituana, conforme a lo establecido en los estatutos institucionales y la normativa vigente.
+
+ARTÍCULO TERCERO.- Encargar a la Secretaría General la notificación correspondiente al señor Andres Tituana sobre la aceptación de su renuncia y las disposiciones administrativas derivadas de la misma.
+
+DISPOSICIONES FINALES:
+
+PRIMERA.- La presente resolución entrará en vigencia a partir de la fecha de suscripción de la misma.
+SEGUNDA.- Comuníquese y cúmplase.
+
+Dado en la ciudad de Quito, a los [FECHA], en la [NUMEROSESSION] sesión [TIPOSESSION] del Órgano Colegiado Superior del Instituto Superior Tecnológico Yaruquí.
+
+Mgs. Isabel Rodriguez
+RECTORA
+
+Lcda. Melissa Aguilar
+SECRETARIA
+'''
+
+
 ```
